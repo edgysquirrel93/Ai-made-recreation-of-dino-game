@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Dino Runner Deluxe</title>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <div id="app">
+    <div id="topbar">
+      <div class="logo">🦖 Dino Runner Deluxe</div>
+      <div class="actions">
+        <button id="btn-menu" class="btn">Menu</button>
+        <button id="btn-pause" class="btn">Pause</button>
+        <button id="btn-mute" class="btn">🔊</button>
+      </div>
+    </div>
+
+    <div id="screen-container">
+      <!-- Main Menu -->
+      <div id="screen-menu" class="screen visible">
+        <div class="card">
+          <h1>🦖 Dino Runner Deluxe</h1>
+          <p class="subtitle">A polished take on the classic Chrome Dino.</p>
+          <div class="menu-grid">
+            <button id="start-game" class="btn primary">Play</button>
+            <button id="open-skins" class="btn">Skins</button>
+            <button id="open-scores" class="btn">High Scores</button>
+            <button id="open-settings" class="btn">Settings</button>
+            <button id="open-help" class="btn">How to Play</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Game Screen -->
+      <div id="screen-game" class="screen">
+        <canvas id="game" width="960" height="320" aria-label="Game canvas"></canvas>
+        <div id="hud">
+          <div id="score">00000</div>
+          <div id="best">BEST 00000</div>
+          <div id="speed">SPD 0</div>
+        </div>
+        <div id="overlay">
+          <div id="overlay-content"></div>
+        </div>
+      </div>
+
+      <!-- Skins -->
+      <div id="screen-skins" class="screen">
+        <div class="card">
+          <h2>Choose Your Dino</h2>
+          <div id="skins-list" class="skins-grid"></div>
+          <div class="row">
+            <button class="btn" id="skins-back">Back</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scores -->
+      <div id="screen-scores" class="screen">
+        <div class="card">
+          <h2>High Scores</h2>
+          <ol id="scores-list" class="scores"></ol>
+          <div class="row">
+            <button class="btn" id="scores-reset">Reset</button>
+            <button class="btn" id="scores-back">Back</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings -->
+      <div id="screen-settings" class="screen">
+        <div class="card">
+          <h2>Settings</h2>
+          <div class="settings">
+            <label class="setting">
+              <span>Day/Night Cycle</span>
+              <input type="checkbox" id="opt-cycle" checked>
+            </label>
+            <label class="setting">
+              <span>Particles</span>
+              <input type="checkbox" id="opt-particles" checked>
+            </label>
+            <label class="setting">
+              <span>Clouds</span>
+              <input type="checkbox" id="opt-clouds" checked>
+            </label>
+            <label class="setting">
+              <span>Difficulty Curve</span>
+              <input type="checkbox" id="opt-curve" checked>
+            </label>
+          </div>
+          <div class="row">
+            <button class="btn" id="settings-back">Back</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Help -->
+      <div id="screen-help" class="screen">
+        <div class="card">
+          <h2>How to Play</h2>
+          <ul class="help">
+            <li>Press <b>Space</b>, <b>W</b>, or <b>Up</b> to jump.</li>
+            <li>Press <b>S</b> or <b>Down</b> to duck.</li>
+            <li>Press <b>P</b> or the <b>Pause</b> button to pause.</li>
+            <li>Avoid cacti and birds. Survive as long as possible.</li>
+            <li>Your score increases with distance and speed.</li>
+          </ul>
+          <div class="row">
+            <button class="btn" id="help-back">Back</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <small>Built for you — no external assets required. LocalStorage keeps your high scores.</small>
+    </footer>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
