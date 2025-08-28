@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Dino Run — HTML5 Canvas Clone</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f7;
+      --fg: #222;
+      --accent: #2e7d32;
+      --muted: #9e9e9e;
+    }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .wrap {
+      display: grid;
+      place-items: center;
+      height: 100%;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    canvas {
+      background: var(--bg);
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      max-width: min(100vw - 32px, 1200px);
+      width: 100%;
+      height: auto;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+      touch-action: none; /* allow custom touch gestures */
+      image-rendering: pixelated;
+    }
+    .hint {
+      margin-top: 10px;
+      font-size: 14px;
+      color: var(--muted);
+      text-align: center;
+      user-select: none;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f0f0f;
+        --fg: #eaeaea;
+        --muted: #a0a0a0;
+      }
+      canvas { border-color: #222; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="960" height="320" aria-label="Dino running game"></canvas>
+    <div class="hint">Jump: Space / W / ↑ • Duck: S / ↓ • Restart: Enter • Tap to jump, press-and-hold to duck</div>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      // ---------- Utilities ----------
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const rand = (min, max) => Math.random() * (max - min) + min;
+      const randi = (min, max) => Math.floor(rand(min, max + 1));
+      const now = () => performance.now();
+
+      // DPR-aware canvas setup
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+
+      function fitDPR() {
+        const rect = canvas.getBoundingClientRect();
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        canvas.width = Math.round(rect.width * dpr);
+        canvas.height = Math.round((rect.width * dpr) * (1/3)); // 3:1 aspect
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        canvas.style.height = (canvas.height / dpr) + 'px';
+      }
+      window.addEventListener('resize', fitDPR, { passive: true });
+      fitDPR();
+
+      // World units: we draw in CSS pixels (pre-DPR), scale via ctx
+      function viewW() { return canvas.clientWidth; }
+      function viewH() { return canvas.clientHeight; }
+
+      // ---------- Game constants ----------
+      const G = 2500;                // gravity px/s^2
+      const JUMP_VELOCITY = -980;    // px/s
+      const DUCK_HEIGHT = 28;
+      const RUN_HEIGHT = 44;
+      const DINO_WIDTH = 48;
+      const DUCK_WIDTH = 64;
+      const START_SPEED = 340;       // px/s
+      const MAX_SPEED = 980;         // px/s
+      const ACCEL = 28;              // px/s^2
+      const GROUND_H = 12;           // ground strip height
+      const SPAWN_MIN = 420;         // min gap in px
+      const SPAWN_MAX = 820;         // max gap in px
+      const BIRD_MIN_SCORE = 150;    // birds start after this score
+      const SCORE_RATE = 0.1;        // points per meter
+      const DAY_LEN = 35;            // seconds for day-night cycle
+
+      // ---------- Input ----------
+      const keys = new Set();
+      let touchDuck = false;
+      let touchPress = false;
+
+      const onKey = (e, down) => {
+        const k = e.key.toLowerCase();
+        if ([' ', 'arrowup', 'w', 'arrowdown', 's', 'enter'].includes(k) || k === ' ') e.preventDefault();
+        if (down) keys.add(k); else keys.delete(k);
+      };
+      window.addEventListener('keydown', e => onKey(e, true));
+      window.addEventListener('keyup', e => onKey(e, false));
+
+      canvas.addEventListener('pointerdown', e => {
+        e.preventDefault();
+        touchPress = true;
+        // Left 70% jump, right 30% duck (one-handed phones)
+        const x = e.clientX - canvas.getBoundingClientRect().left;
+        if (x > canvas.clientWidth * 0.7) touchDuck = true;
+      }, { passive: false });
+      window.addEventListener('pointerup', e => {
+        touchPress = false;
+        touchDuck = false;
+      });
+
+      // ---------- Entities ----------
+      class Dino {
+        constructor(groundY) {
+          this.x = 80;
+          this.groundY = groundY;
+          this.reset();
+        }
+        reset() {
+          this.y = this.groundY - RUN_HEIGHT;
+          this.vy = 0;
+          this.duck = false;
+          this.dead = false;
+          this.runPhase = 0;
+        }
+        bbox() {
+          const w = this.duck ? DUCK_WIDTH : DINO_WIDTH;
+          const h = this.duck ? DUCK_HEIGHT : RUN_HEIGHT;
+          return { x: this.x, y: this.y, w, h };
+        }
+        canJump() {
+          return Math.abs((this.y + this.height()) - this.groundY) < 0.5 && !this.duck;
+        }
+        height() { return this.duck ? DUCK_HEIGHT : RUN_HEIGHT; }
+        width() { return this.duck ? DUCK_WIDTH : DINO_WIDTH; }
+        jump() {
+          if (this.canJump()) {
+            this.vy = JUMP_VELOCITY;
+          }
+        }
+        setDuck(d) {
+          if (d && this.canJump()) {
+            // allow entering duck only on ground
+            this.duck = true;
+            this.y = this.groundY - DUCK_HEIGHT;
+          } else if (!d && this.duck) {
+            this.duck = false;
+            this.y = this.groundY - RUN_HEIGHT;
+          }
+        }
+        update(dt) {
+          // Apply gravity
+          this.vy += G * dt;
+          this.y += this.vy * dt;
+
+          // Clamp to ground
+          const h = this.height();
+          if (this.y + h >= this.groundY) {
+            this.y = this.groundY - h;
+            this.vy = 0;
+          }
+
+          // Footstep animation phase
+          this.runPhase = (this.runPhase + dt * 10) % 2;
+        }
+        draw(ctx, t, theme) {
+          const { x } = this;
+          const y = Math.round(this.y);
+          const w = this.width(), h = this.height();
+
+          // Body
+          ctx.save();
+          ctx.translate(Math.round(x), y);
+          ctx.fillStyle = theme.dino;
+          // Torso / main
+          ctx.fillRect(6, 4, w - 12, h - 8);
+
+          // Head or extended duck body
+          if (!this.duck) {
+            ctx.fillRect(w - 18, 0, 16, 16); // head
+            // Eye blink
+            const blink = Math.floor(t * 2) % 50 === 0;
+            ctx.fillStyle = theme.bg;
+            ctx.fillRect(w - 8, 5 + (blink ? 3 : 0), 6, blink ? 2 : 6);
+            ctx.fillStyle = theme.dino;
+            // Arms
+            ctx.fillRect(2, 8, 8, 6);
+          } else {
+            // Ducking extended head
+            ctx.fillRect(w - 20, h - 28, 18, 18);
+            ctx.fillStyle = theme.bg;
+            ctx.fillRect(w - 10, h - 24, 6, 6);
+            ctx.fillStyle = theme.dino;
+          }
+
+          // Legs animation
+          const legUp = this.runPhase < 1;
+          if (!this.duck) {
+            ctx.fillRect(10, h - 6, 10, 6);
+            ctx.fillRect(w - 28, h - 6, 10, 6);
+            ctx.fillRect(legUp ? 20 : 30, h - (legUp ? 14 : 6), 10, legUp ? 14 : 6);
+          } else {
+            ctx.fillRect(12, h - 6, 16, 6);
+            ctx.fillRect(32, h - 6, 16, 6);
+          }
+          ctx.restore();
+        }
+      }
+
+      class Cactus {
+        constructor(groundY, speed) {
+          this.type = Math.random() < 0.7 ? 'small' : 'big';
+          const cluster = Math.random() < 0.4 ? randi(1, 3) : 1;
+          this.parts = [];
+          let xOffset = 0;
+          for (let i = 0; i < cluster; i++) {
+            const w = this.type === 'small' ? randi(14, 20) : randi(22, 28);
+            const h = this.type === 'small' ? randi(32, 46) : randi(52, 74);
+            this.parts.push({ w, h, ox: xOffset });
+            xOffset += w + randi(6, 12);
+          }
+          this.w = xOffset;
+          this.h = Math.max(...this.parts.map(p => p.h));
+          this.x = viewW() + rand(0, 60);
+          this.y = groundY - this.h;
+          this.speed = speed;
+        }
+        bbox() {
+          return { x: this.x, y: this.y, w: this.w, h: this.h };
+        }
+        update(dt, speed) {
+          this.x -= speed * dt;
+        }
+        offscreen() {
+          return this.x + this.w < -50;
+        }
+        draw(ctx, theme, groundY) {
+          ctx.save();
+          ctx.translate(Math.round(this.x), groundY - this.h);
+          ctx.fillStyle = theme.obstacle;
+          for (const p of this.parts) {
+            // simple pixel cactus
+            ctx.fillRect(p.ox, this.h - p.h, p.w, p.h);
+            ctx.fillRect(p.ox - 6, this.h - p.h + 16, 6, 10);
+            ctx.fillRect(p.ox + p.w, this.h - p.h + 10, 6, 12);
+          }
+          ctx.restore();
+        }
+      }
+
+      class Bird {
+        constructor(groundY, speed, score) {
+          const heights = [groundY - 28, groundY - 64, groundY - 96];
+          this.y = heights[randi(0, heights.length - 1)];
+          this.x = viewW() + 40;
+          this.w = 44;
+          this.h = 28;
+          this.speed = speed * rand(1.02, 1.15);
+          this.phase = 0;
+        }
+        bbox() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+        update(dt, speed) {
+          this.x -= this.speed * dt;
+          this.phase = (this.phase + dt * 12) % 2;
+        }
+        offscreen() { return this.x + this.w < -50; }
+        draw(ctx, theme) {
+          ctx.save();
+          ctx.translate(Math.round(this.x), Math.round(this.y));
+          ctx.fillStyle = theme.obstacle;
+          // Wing animation: two poses
+          if (this.phase < 1) {
+            ctx.fillRect(0, 10, this.w, 6);
+            ctx.fillRect(8, 0, 10, 10);
+            ctx.fillRect(26, 0, 10, 10);
+          } else {
+            ctx.fillRect(0, 10, this.w, 6);
+            ctx.fillRect(8, 16, 10, 10);
+            ctx.fillRect(26, 16, 10, 10);
+          }
+          // eye
+          ctx.fillStyle = theme.bg;
+          ctx.fillRect(this.w - 8, 8, 4, 4);
+          ctx.restore();
+        }
+      }
+
+      class Cloud {
+        constructor() {
+          this.y = randi(20, 80);
+          this.x = viewW() + rand(20, 120);
+          this.w = randi(36, 72);
+          this.h = randi(12, 24);
+          this.speed = rand(18, 34);
+          this.alpha = rand(0.3, 0.9);
+        }
+        update(dt, speed) {
+          this.x -= (this.speed + speed * 0.1) * dt;
+        }
+        offscreen() { return this.x + this.w < -20; }
+        draw(ctx, theme) {
+          ctx.save();
+          ctx.globalAlpha = this.alpha;
+          ctx.fillStyle = theme.cloud;
+          const x = Math.round(this.x), y = Math.round(this.y);
+          ctx.fillRect(x, y, this.w, this.h);
+          ctx.fillRect(x + 10, y - 8, this.w * 0.6, this.h);
+          ctx.fillRect(x + 20, y + 6, this.w * 0.5, this.h * 0.8);
+          ctx.globalAlpha = 1;
+          ctx.restore();
+        }
+      }
+
+      // ---------- Collision ----------
+      function intersects(a, b) {
+        return a.x < b.x + b.w &&
+               a.x + a.w > b.x &&
+               a.y < b.y + b.h &&
+               a.y + a.h > b.y;
+      }
+
+      // ---------- Theme / day-night ----------
+      function themeAt(tSec) {
+        // tSec cycles DAY_LEN. 0=>day, 0.5=>night, 1=>day
+        const p = (tSec / DAY_LEN) % 1;
+        const phase = Math.sin(p * Math.PI); // 0..1..0
+        // interpolate colors
+        const lerp = (a, b, k) => Math.round(a + (b - a) * k);
+        const bgDay = [247,247,247], bgNight = [18,18,18];
+        const fgDay = [34,34,34],  fgNight = [230,230,230];
+        const bg = bgDay.map((c,i)=> lerp(c, bgNight[i], phase));
+        const fg = fgDay.map((c,i)=> lerp(c, fgNight[i], phase));
+        const color = (arr) => `rgb(${arr[0]},${arr[1]},${arr[2]})`;
+        return {
+          bg: color(bg),
+          fg: color(fg),
+          ground: color(fg.map(v=> Math.round(v*0.7))),
+          cloud: color(fg.map(v=> Math.round((v+bg[v?0:0])/2))), // soft
+          obstacle: color(fg),
+          dino: color(fg)
+        };
+      }
+
+      // ---------- Game state ----------
+      const state = {
+        started: false,
+        gameOver: false,
+        t: 0,
+        score: 0,
+        high: Number(localStorage.getItem('dinoHighScore') || 0),
+        speed: START_SPEED,
+        nextSpawn: SPAWN_MIN,
+        obstacles: [],
+        clouds: [],
+      };
+
+      function resetGame() {
+        state.started = false;
+        state.gameOver = false;
+        state.t = 0;
+        state.score = 0;
+        state.speed = START_SPEED;
+        state.obstacles.length = 0;
+        state.clouds.length = 0;
+        dino.reset();
+      }
+
+      // Ground baseline depends on canvas height
+      function groundY() {
+        return Math.round(viewH() - 28);
+      }
+
+      const dino = new Dino(groundY());
+
+      // ---------- Spawning ----------
+      function scheduleNextSpawn() {
+        const k = 1 - (state.speed - START_SPEED) / (MAX_SPEED - START_SPEED);
+        const minGap = clamp(SPAWN_MIN * (0.6 + k * 0.4), 260, SPAWN_MIN);
+        const maxGap = clamp(SPAWN_MAX * (0.6 + k * 0.4), SPAWN_MIN, SPAWN_MAX);
+        state.nextSpawn = rand(minGap, maxGap);
+      }
+
+      scheduleNextSpawn();
+
+      // ---------- Game loop ----------
+      let last = now();
+
+      function step() {
+        const t1 = now();
+        const dt = clamp((t1 - last) / 1000, 0, 0.05);
+        last = t1;
+
+        update(dt);
+        draw(t1 / 1000);
+
+        requestAnimationFrame(step);
+      }
+
+      function update(dt) {
+        // Resize-aware ground
+        dino.groundY = groundY();
+
+        // Inputs
+        const jumpPressed = keys.has(' ') || keys.has('w') || keys.has('arrowup') || touchPress;
+        const duckPressed = keys.has('s') || keys.has('arrowdown') || touchDuck;
+
+        if (!state.started) {
+          // Await any jump to start
+          dino.setDuck(false);
+          if (jumpPressed) {
+            state.started = true;
+          }
+        } else if (state.gameOver) {
+          // Wait for Enter or Space to restart
+          if (keys.has('enter') || jumpPressed) {
+            resetGame();
+          }
+        } else {
+          // Active gameplay
+          if (jumpPressed) dino.jump();
+          dino.setDuck(duckPressed);
+
+          // Time, speed, score
+          state.t += dt;
+          state.speed = clamp(state.speed + ACCEL * dt, START_SPEED, MAX_SPEED);
+          const meters = state.t * state.speed / 10;
+          state.score = Math.floor(meters * SCORE_RATE);
+
+          // Dots of clouds
+          if (state.clouds.length < 6 && Math.random() < 0.02) {
+            state.clouds.push(new Cloud());
+          }
+          for (const c of state.clouds) c.update(dt, state.speed);
+          while (state.clouds.length && state.clouds[0].offscreen()) state.clouds.shift();
+
+          // Obstacles spawn based on distance traveled since last spawn
+          state.nextSpawn -= state.speed * dt;
+          if (state.nextSpawn <= 0) {
+            const spawnBird = state.score >= BIRD_MIN_SCORE && Math.random() < clamp((state.speed - START_SPEED) / (MAX_SPEED - START_SPEED), 0.1, 0.65);
+            if (spawnBird) state.obstacles.push(new Bird(groundY(), state.speed, state.score));
+            else state.obstacles.push(new Cactus(groundY(), state.speed));
+            scheduleNextSpawn();
+          }
+
+          // Update dino and obstacles
+          dino.update(dt);
+          for (const o of state.obstacles) o.update(dt, state.speed);
+          while (state.obstacles.length && state.obstacles[0].offscreen()) state.obstacles.shift();
+
+          // Collisions
+          const db = dino.bbox();
+          // Slightly shrink dino bbox for fairness
+          const fair = { x: db.x + 4, y: db.y + 2, w: db.w - 8, h: db.h - 4 };
+          for (const o of state.obstacles) {
+            const ob = o.bbox();
+            if (intersects(fair, ob)) {
+              state.gameOver = true;
+              state.high = Math.max(state.high, state.score);
+              localStorage.setItem('dinoHighScore', String(state.high));
+              break;
+            }
+          }
+        }
+      }
+
+      function draw(tSec) {
+        const theme = themeAt(state.t);
+        // Background
+        ctx.save();
+        ctx.fillStyle = theme.bg;
+        ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
+        // Clouds
+        for (const c of state.clouds) c.draw(ctx, theme);
+
+        // Ground
+        const gy = groundY();
+        ctx.fillStyle = theme.ground;
+        ctx.fillRect(0, gy, canvas.clientWidth, GROUND_H);
+        // Dotted ground pattern
+        ctx.fillStyle = theme.ground;
+        const step = 14;
+        const scroll = Math.floor((state.t * state.speed) % step);
+        for (let x = -scroll; x < canvas.clientWidth; x += step) {
+          ctx.fillRect(x, gy - 4, 6, 2);
+        }
+
+        // Obstacles
+        for (const o of state.obstacles) o.draw(ctx, theme, gy);
+
+        // Dino
+        dino.draw(ctx, tSec, theme);
+
+        // UI: score / high
+        ctx.fillStyle = theme.fg;
+        ctx.font = '16px monospace';
+        ctx.textBaseline = 'top';
+        const scoreStr = String(state.score).padStart(5, '0');
+        const highStr = String(state.high).padStart(5, '0');
+        ctx.fillText(`HI ${highStr}  ${scoreStr}`, canvas.clientWidth - 200, 10);
+
+        // Start / Game Over overlays
+        ctx.textAlign = 'center';
+        if (!state.started) {
+          ctx.font = '20px ui-sans-serif, system-ui, Segoe UI, Roboto';
+          ctx.fillText('Press Space or Tap to Start', canvas.clientWidth / 2, gy - 100);
+          ctx.font = '14px monospace';
+          ctx.fillText('Jump: Space/W/↑ • Duck: S/↓ • Restart: Enter', canvas.clientWidth / 2, gy - 72);
+        } else if (state.gameOver) {
+          ctx.font = '28px ui-sans-serif, system-ui, Segoe UI, Roboto';
+          ctx.fillText('GAME OVER', canvas.clientWidth / 2, gy - 110);
+          ctx.font = '16px monospace';
+          ctx.fillText('Press Enter or Space to Restart', canvas.clientWidth / 2, gy - 80);
+        }
+
+        ctx.restore();
+      }
+
+      // Kick off
+      requestAnimationFrame(step);
+    })();
+  </script>
+</body>
+</html>
