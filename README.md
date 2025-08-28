@@ -1,1 +1,3 @@
 This file includes the ai made recreations of the chrome dino game, it includes a python encoded version and a html version. The python version can be run be double clicking the exe and the html can be run just by double clicking it and it will open the browser
+
+note: The sound on the chatgpt python game doesnt work
