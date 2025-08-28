@@ -1,0 +1,371 @@
+"""
+Dino Runner Deluxe — Python / pygame v2 (procedural pixel-art sprites + WAV sounds)
+Run: pip install -r requirements.txt
+Then: python main.py
+"""
+import os, sys, json, math, random, pygame
+from pygame.locals import *
+
+# Config
+WIDTH, HEIGHT = 960, 360
+FPS = 60
+GROUND_Y = 260
+GRAVITY = 2100.0
+JUMP_V = 820.0
+WORLD_SPEED_START = 340.0
+WORLD_SPEED_MAX = 900.0
+SCORE_RATE = 12
+HIGH_SCORES_FILE = "highscores.json"
+SOUNDS_DIR = os.path.join(os.path.dirname(__file__), "sounds")
+
+# Helpers
+def clamp(v,a,b): return max(a, min(b, v))
+def fmt_score(s): return str(int(s)).zfill(5)
+
+# Persistence
+def load_scores():
+    try:
+        with open(HIGH_SCORES_FILE,"r") as f: return json.load(f)
+    except: return []
+def save_scores(scores):
+    try:
+        with open(HIGH_SCORES_FILE,"w") as f: json.dump(scores[:10], f, indent=2)
+    except Exception as e: print("save error", e)
+def add_score(name, score):
+    s = load_scores(); s.append({"name":name,"score":int(score)}); s.sort(key=lambda x:-x["score"]); save_scores(s)
+
+# Procedural sprite helpers
+def create_surface_pixels(w,h,scale=3):
+    surf = pygame.Surface((w*scale, h*scale), pygame.SRCALPHA)
+    return surf
+def draw_pixel_rect(surf, x,y,w,h, color, scale=3):
+    r = pygame.Rect(x*scale, y*scale, w*scale, h*scale)
+    pygame.draw.rect(surf, color, r)
+
+def create_dino_frames(scale=3):
+    frames = []
+    for frame in range(4):
+        surf = create_surface_pixels(16,16,scale)
+        surf.fill((0,0,0,0))
+        body = (70,150,70)
+        dark = (40,110,40)
+        eye = (10,10,10)
+        draw_pixel_rect(surf, 3,5,10,6, body, scale)
+        if frame % 2 == 0:
+            draw_pixel_rect(surf, 4,11,3,3, body, scale)
+            draw_pixel_rect(surf, 9,11,3,3, dark, scale)
+        else:
+            draw_pixel_rect(surf, 4,11,3,3, dark, scale)
+            draw_pixel_rect(surf, 9,11,3,3, body, scale)
+        draw_pixel_rect(surf, 1,7,3,3, dark, scale)
+        draw_pixel_rect(surf, 11,6,3,3, body, scale)
+        draw_pixel_rect(surf, 13,7,1,1, eye, scale)
+        draw_pixel_rect(surf, 6,6,2,2, dark, scale)
+        frames.append(surf)
+    # jump frame
+    jump = create_surface_pixels(16,16,scale)
+    jump.fill((0,0,0,0))
+    draw_pixel_rect(jump, 3,3,10,8, body, scale)
+    draw_pixel_rect(jump, 1,6,3,3, dark, scale)
+    draw_pixel_rect(jump, 12,6,2,2, eye, scale)
+    frames[3] = jump
+    return frames
+
+def create_cactus_variants(scale=3):
+    variants = []
+    for size in [(3,6),(4,9),(5,11)]:
+        w,h = size
+        surf = create_surface_pixels(8,16,scale)
+        surf.fill((0,0,0,0))
+        color = (34,120,38)
+        draw_pixel_rect(surf, 2, 16-h, w, h, color, scale)
+        draw_pixel_rect(surf, 1, 16-h+3, 1, 3, color, scale)
+        draw_pixel_rect(surf, 2+w, 16-h+2, 1, 4, color, scale)
+        variants.append(surf)
+    return variants
+
+def create_bird_frames(scale=3):
+    frames = []
+    for i in range(2):
+        surf = create_surface_pixels(12,8,scale)
+        surf.fill((0,0,0,0))
+        color = (50,50,50)
+        draw_pixel_rect(surf, 2,2,8,4,color,scale)
+        if i==0:
+            draw_pixel_rect(surf, 3, -2+4, 3, 3, color, scale)
+        else:
+            draw_pixel_rect(surf, 3, 4, 3, 3, color, scale)
+        draw_pixel_rect(surf, 10,4,2,1,(100,60,20),scale)
+        frames.append(surf)
+    return frames
+
+# Game objects
+class Player:
+    def __init__(self, frames):
+        self.x = 60; self.y = GROUND_Y-44; self.vy = 0.0
+        self.on_ground = True; self.duck = False; self.dead = False
+        self.frames = frames
+        self.anim = 0.0
+        self.w = frames[0].get_width(); self.h = frames[0].get_height()
+    def reset(self):
+        self.y = GROUND_Y - self.h; self.vy=0; self.on_ground=True; self.dead=False; self.anim=0
+    def update(self, dt, jump_pressed, duck_pressed):
+        if jump_pressed and self.on_ground:
+            self.vy = -JUMP_V; self.on_ground=False
+        self.duck = duck_pressed and not self.on_ground
+        self.vy += GRAVITY*dt
+        self.y += self.vy*dt
+        if self.y + self.h >= GROUND_Y:
+            self.y = GROUND_Y - self.h; self.vy = 0; self.on_ground = True
+        self.anim += (0.5 if not self.on_ground else 0.02) * dt * FPS
+    def get_image(self):
+        idx = int(self.anim*10) % 3
+        if not self.on_ground: idx = 3
+        return self.frames[idx]
+    def rect(self): return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+class Obstacle:
+    def __init__(self, surf, x, kind):
+        self.surf = surf; self.x = x; self.kind = kind
+        self.y = GROUND_Y - surf.get_height()
+        self.w = surf.get_width(); self.h = surf.get_height()
+        self.t = 0.0
+    def update(self, dt, speed):
+        self.x -= speed*dt
+        self.t += dt
+    def rect(self): return pygame.Rect(int(self.x), int(self.y), int(self.w), int(self.h))
+
+# Main game class
+class DinoGame:
+    def __init__(self):
+        pygame.mixer.pre_init(44100, -16, 2, 512)
+        pygame.init()
+        self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        pygame.display.set_caption("Dino Runner Deluxe — Python (pixel art)")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont(None, 24)
+        self.big = pygame.font.SysFont(None, 40)
+        # sprites
+        self.dino_frames = create_dino_frames(scale=3)
+        self.cactus_variants = create_cactus_variants(scale=3)
+        self.bird_frames = create_bird_frames(scale=3)
+        # sounds
+        try:
+            self.snd_jump = pygame.mixer.Sound(os.path.join(SOUNDS_DIR,"jump.wav"))
+            self.snd_score = pygame.mixer.Sound(os.path.join(SOUNDS_DIR,"score.wav"))
+            self.snd_gameover = pygame.mixer.Sound(os.path.join(SOUNDS_DIR,"gameover.wav"))
+        except Exception as e:
+            print("Sound load failed:", e)
+            self.snd_jump = self.snd_score = self.snd_gameover = None
+        # state
+        self.reset_world()
+        self.best = max([s["score"] for s in load_scores()] or [0])
+        self.skin_idx = 0
+
+    def reset_world(self):
+        self.player = Player(self.dino_frames)
+        self.objects = []
+        self.particles = []
+        self.clouds = [{"x": random.randint(0,WIDTH), "y": random.randint(20,140), "s": random.uniform(0.2,0.8)} for _ in range(6)]
+        self.world_t = 0.0; self.world_speed = WORLD_SPEED_START; self.score = 0
+        self.in_game = False; self.paused=False; self.game_over=False; self.night_t=0.0; self.sky=0.0
+
+    def spawn_cactus(self, x):
+        surf = random.choice(self.cactus_variants)
+        self.objects.append(Obstacle(surf, x, "cactus"))
+    def spawn_bird(self, x):
+        surf = random.choice(self.bird_frames)
+        self.objects.append(Obstacle(surf, x, "bird"))
+
+    def maybe_spawn(self):
+        last = self.objects[-1] if self.objects else None
+        gap = random.randint(280,520) * (1.2 - self.world_speed/1100.0)
+        if (not last) or (last.x < WIDTH - gap):
+            if random.random() < 0.28 and self.world_speed > 420:
+                self.spawn_bird(WIDTH + random.randint(0,80))
+            else:
+                n = 1 if random.random()<0.7 else (2 if random.random()<0.5 else 3)
+                x = WIDTH + random.randint(0,80)
+                for i in range(n):
+                    self.spawn_cactus(x); x += random.randint(18,36)
+
+    def update(self, dt, keys_pressed):
+        if not self.in_game or self.paused or self.game_over: return
+        self.world_t += dt
+        self.world_speed = clamp(self.world_speed + 30.0*dt, WORLD_SPEED_START, WORLD_SPEED_MAX)
+        self.night_t += dt; cycle = 22.0; self.sky = (math.sin(self.night_t/cycle*2*math.pi)*0.5+0.5)
+        for c in self.clouds:
+            c["x"] -= (20*c["s"] + self.world_speed*0.1)*dt
+            if c["x"] < -40:
+                c["x"] = WIDTH + random.randint(0,80); c["y"]=random.randint(20,140); c["s"]=random.uniform(0.2,0.8)
+        jump = keys_pressed.get(K_SPACE) or keys_pressed.get(K_UP) or keys_pressed.get(K_w)
+        duck = keys_pressed.get(K_DOWN) or keys_pressed.get(K_s)
+        if jump and self.player.on_ground:
+            if self.snd_jump: self.snd_jump.play()
+        self.player.update(dt, jump, duck)
+        self.maybe_spawn()
+        for o in list(self.objects): o.update(dt, self.world_speed)
+        self.objects = [o for o in self.objects if o.x + o.w > -50]
+        if self.player.on_ground and len(self.particles) < 120:
+            self.particles.append({"x": self.player.x+10, "y": self.player.y + self.player.h, "vx": random.uniform(-80,-40), "vy": random.uniform(-60,-20), "life": random.uniform(.25,.55)})
+        for p in list(self.particles):
+            p["life"] -= dt; p["x"] += p["vx"]*dt; p["y"] += p["vy"]*dt; p["vy"] += 200*dt
+        self.particles = [p for p in self.particles if p["life"]>0]
+        self.score += int(SCORE_RATE * dt * (self.world_speed / WORLD_SPEED_START))
+        pr = self.player.rect()
+        for o in self.objects:
+            if pr.colliderect(o.rect()):
+                if self.snd_gameover: self.snd_gameover.play()
+                self.game_over = True; self.in_game = False
+                if self.score > self.best: self.best = self.score
+                break
+
+    def draw_ground(self):
+        pygame.draw.rect(self.screen, (222,222,222), (0, GROUND_Y, WIDTH, HEIGHT-GROUND_Y))
+        for i in range(0, WIDTH, 28): pygame.draw.rect(self.screen, (199,199,199), (i, GROUND_Y+2, 20, 2))
+
+    def render(self):
+        t = self.sky
+        if t > 0.7: top=(10,10,20); bot=(4,4,10)
+        else: top=(int(220*(1-t)), int(240*(1-t)), int(255*(1-t))); bot=(int(150*(1-t)), int(190*(1-t)), int(255*(1-t)))
+        self.screen.fill(top)
+        if t < 0.7:
+            for c in self.clouds: pygame.draw.ellipse(self.screen, (220,220,220), (int(c["x"]), int(c["y"]), int(44*c["s"]), int(24*c["s"])))
+        else:
+            for i in range(60): pygame.draw.rect(self.screen, (255,255,255), ((i*17 + int(self.world_t*0.05))%WIDTH, (i*23)%140, 2, 2))
+        self.draw_ground()
+        for o in self.objects: self.screen.blit(o.surf, (int(o.x), int(o.y)))
+        for p in self.particles: pygame.draw.rect(self.screen, (119,119,119), (int(p["x"]), int(p["y"]), 3, 3))
+        img = self.player.get_image(); self.screen.blit(img, (int(self.player.x), int(self.player.y)))
+        score_surf = self.font.render(fmt_score(self.score), True, (68,68,68))
+        best_surf = self.font.render("BEST " + fmt_score(self.best), True, (68,68,68))
+        spd_surf = self.font.render("SPD " + str(int(self.world_speed)), True, (68,68,68))
+        self.screen.blit(score_surf, (WIDTH-120, 8)); self.screen.blit(best_surf, (WIDTH-260,8)); self.screen.blit(spd_surf, (WIDTH-360,8))
+
+    def menu_loop(self):
+        opts = ["Play","Skins","High Scores","Settings","Quit"]
+        sel = 0
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN:
+                    if ev.key in (K_RETURN, K_SPACE): return opts[sel]
+                    if ev.key == K_UP: sel = (sel-1)%len(opts)
+                    if ev.key == K_DOWN: sel = (sel+1)%len(opts)
+            self.screen.fill((24,24,24))
+            title = self.big.render("🦖 Dino Runner Deluxe", True, (220,220,220))
+            self.screen.blit(title, (40,36))
+            for i,opt in enumerate(opts):
+                col = (120,220,150) if i==sel else (180,180,180)
+                txt = self.font.render(opt, True, col); self.screen.blit(txt, (60,140 + i*36))
+            pygame.display.flip()
+
+    def skins_loop(self):
+        idx = self.skin_idx
+        names = ["Classic","Mint","Violet","Sunset","Mono","Ocean"]
+        cols = [(43,43,43),(61,220,151),(167,139,250),(255,142,83),(17,17,17),(108,195,255)]
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN:
+                    if ev.key == K_ESCAPE: self.skin_idx = idx; return
+                    if ev.key == K_LEFT: idx = (idx-1) % len(names)
+                    if ev.key == K_RIGHT: idx = (idx+1) % len(names)
+                    if ev.key in (K_RETURN, K_SPACE): self.skin_idx = idx; return
+            self.screen.fill((18,18,18))
+            title = self.big.render("Choose Skin", True, (220,220,220)); self.screen.blit(title, (40,28))
+            for i in range(len(names)):
+                x = 60 + (i%3)*300; y = 100 + (i//3)*140
+                pygame.draw.rect(self.screen, cols[i], (x, y+20, 60, 40))
+                lbl = self.font.render(names[i], True, (200,200,200)); self.screen.blit(lbl, (x+80, y+36))
+                if i==idx: pygame.draw.rect(self.screen, (120,200,160), (x-12, y-12, 188, 128), 3)
+            info = self.font.render("← → to change / Enter to select / Esc to back", True, (160,160,160)); self.screen.blit(info, (40, HEIGHT-40))
+            pygame.display.flip()
+
+    def scores_loop(self):
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN and ev.key in (K_ESCAPE, K_BACKSPACE): return
+            self.screen.fill((18,18,18)); title = self.big.render("High Scores", True, (220,220,220)); self.screen.blit(title, (40,28))
+            scores = load_scores()
+            for i,s in enumerate(scores[:10]):
+                txt = self.font.render(f"{i+1}. {s['name']} — {fmt_score(s['score'])}", True, (200,200,200)); self.screen.blit(txt, (60, 100 + i*30))
+            pygame.display.flip()
+
+    def settings_loop(self):
+        opts = ["Day/Night (in-game only)","Particles (in-game only)"]; sel=0
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN:
+                    if ev.key in (K_ESCAPE, K_BACKSPACE): return
+                    if ev.key==K_UP: sel=(sel-1)%len(opts)
+                    if ev.key==K_DOWN: sel=(sel+1)%len(opts)
+            self.screen.fill((18,18,18)); title=self.big.render("Settings", True, (220,220,220)); self.screen.blit(title,(40,28))
+            for i,o in enumerate(opts):
+                col=(120,220,150) if i==sel else (200,200,200); txt=self.font.render(o,True,col); self.screen.blit(txt,(60,100+i*36))
+            pygame.display.flip()
+
+    def prompt_name(self):
+        name=""
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN:
+                    if ev.key==K_RETURN: return name.strip() or "You"
+                    if ev.key==K_ESCAPE: return None
+                    if ev.key==K_BACKSPACE: name = name[:-1]
+                    elif len(ev.unicode)==1 and len(name)<20: name += ev.unicode
+            self.draw_overlay_gameover(name); pygame.display.flip()
+
+    def draw_overlay_gameover(self, name=""):
+        s = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); s.fill((17,17,17,220)); self.screen.blit(s,(0,0))
+        txt = self.big.render("Game Over", True, (240,240,240)); self.screen.blit(txt,(WIDTH//2 - txt.get_width()//2, HEIGHT//2 - 80))
+        score_txt = self.font.render(f"Score: {fmt_score(self.score)}", True, (220,220,220)); self.screen.blit(score_txt,(WIDTH//2 - score_txt.get_width()//2, HEIGHT//2 - 20))
+        name_surf = self.font.render("Name: " + name, True, (255,255,255)); self.screen.blit(name_surf,(WIDTH//2 - name_surf.get_width()//2, HEIGHT//2 + 60))
+
+    def run(self):
+        while True:
+            choice = self.menu_loop()
+            if choice == "Play":
+                self.reset_world(); self.in_game=True; self.game_loop()
+            elif choice == "Skins": self.skins_loop()
+            elif choice == "High Scores": self.scores_loop()
+            elif choice == "Settings": self.settings_loop()
+            else: break
+        self.quit()
+
+    def game_loop(self):
+        keys = {}
+        while True:
+            dt = self.clock.tick(FPS)/1000.0
+            for ev in pygame.event.get():
+                if ev.type == QUIT: self.quit()
+                if ev.type == KEYDOWN:
+                    keys[ev.key]=True
+                    if ev.key==K_p: self.paused = not self.paused
+                    if ev.key==K_r and self.game_over: self.reset_world(); self.in_game=True; self.game_over=False; return
+                if ev.type==KEYUP: keys[ev.key]=False
+            if not self.in_game:
+                self.draw_overlay_gameover(); pygame.display.flip()
+                name = self.prompt_name()
+                if name: add_score(name, self.score)
+                return
+            if not self.paused: self.update(dt, keys)
+            self.render()
+            if self.paused: self.draw_overlay_pause()
+            pygame.display.flip()
+
+    def draw_overlay_pause(self):
+        s = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); s.fill((17,17,17,180)); self.screen.blit(s,(0,0))
+        txt = self.big.render("Paused", True, (240,240,240)); self.screen.blit(txt,(WIDTH//2 - txt.get_width()//2, HEIGHT//2 - 40))
+    def quit(self): pygame.quit(); sys.exit()
+
+if __name__ == "__main__":
+    game = DinoGame(); game.run()
