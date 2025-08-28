@@ -1,0 +1,218 @@
+import pygame
+import random
+import os
+
+# Constants
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 400
+SKY = (135, 206, 250)
+NIGHT = (25, 25, 112)
+GROUND_HEIGHT = 40
+
+def clamp(value, min_value, max_value):
+    return max(min_value, min(value, max_value))
+
+class Dino:
+    def __init__(self, jump_sound):
+        self.image = pygame.Surface((40, 40))
+        self.image.fill((255, 255, 255))
+        self.rect = self.image.get_rect()
+        self.rect.x = 50
+        self.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT - self.rect.height
+        self.jumping = False
+        self.jump_speed = -12
+        self.gravity = 0.6
+        self.vel_y = 0
+        self.jump_sound = jump_sound
+
+    def jump(self):
+        if not self.jumping:
+            self.jumping = True
+            self.vel_y = self.jump_speed
+            if self.jump_sound: self.jump_sound.play()
+
+    def update(self, dt):
+        if self.jumping:
+            self.rect.y += self.vel_y
+            self.vel_y += self.gravity
+            if self.rect.y >= SCREEN_HEIGHT - GROUND_HEIGHT - self.rect.height:
+                self.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT - self.rect.height
+                self.jumping = False
+
+    def draw(self, surface, night):
+        self.image.fill((255, 255, 0) if night else (255, 255, 255))
+        surface.blit(self.image, self.rect)
+
+class Ground:
+    def __init__(self):
+        self.image = pygame.Surface((SCREEN_WIDTH, GROUND_HEIGHT))
+        self.image.fill((139, 69, 19))
+        self.rect = self.image.get_rect()
+        self.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT
+
+    def update(self, dt):
+        pass
+
+    def draw(self, surface, night):
+        surface.blit(self.image, self.rect)
+
+class Cloud:
+    def __init__(self):
+        self.image = pygame.Surface((60, 30))
+        self.image.fill((255, 255, 255))
+        self.rect = self.image.get_rect()
+        self.rect.x = SCREEN_WIDTH
+        self.rect.y = random.randint(50, 150)
+        self.speed = 1
+
+    def update(self, dt):
+        self.rect.x -= self.speed
+        return self.rect.x >= -self.rect.width
+
+    def draw(self, surface, night):
+        surface.blit(self.image, self.rect)
+
+class Obstacle:
+    def __init__(self, speed):
+        self.image = pygame.Surface((30, 50))
+        self.image.fill((0, 255, 0))
+        self.rect = self.image.get_rect()
+        self.rect.x = SCREEN_WIDTH
+        self.rect.y = SCREEN_HEIGHT - GROUND_HEIGHT - self.rect.height
+        self.speed = speed
+
+    def update(self, dt):
+        self.rect.x -= self.speed
+        return self.rect.x >= -self.rect.width
+
+    def draw(self, surface, night):
+        surface.blit(self.image, self.rect)
+
+class Game:
+    def __init__(self):
+        pygame.init()
+        pygame.mixer.init()
+        self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+        pygame.display.set_caption("Dino Runner")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont(None, 32)
+
+        # Load sounds safely
+        self.jump_sound = self.safe_sound("jump.wav")
+        self.gameover_sound = self.safe_sound("gameover.wav")
+
+        self.reset()
+
+    def safe_sound(self, filename):
+        if os.path.exists(filename):
+            try:
+                return pygame.mixer.Sound(filename)
+            except pygame.error:
+                return None
+        return None
+
+    def reset(self):
+        self.dino = Dino(self.jump_sound)
+        self.ground = Ground()
+        self.clouds = []
+        self.obstacles = []
+        self.spawn_timer = 1000
+        self.cloud_timer = 2000
+        self.speed = 6.0
+        self.score = 0
+        self.high_score = getattr(self, "high_score", 0)
+        self.running = True
+        self.game_over = False
+
+    def is_night(self):
+        ticks = pygame.time.get_ticks() // 1000
+        return (ticks // 5) % 2 == 1
+
+    def spawn_cloud(self):
+        self.clouds.append(Cloud())
+
+    def spawn_obstacle(self):
+        self.obstacles.append(Obstacle(self.speed))
+
+    def draw_hud(self, night):
+        score_surf = self.font.render(f"Score: {self.score}", True, (255, 255, 255))
+        hs_surf = self.font.render(f"High: {self.high_score}", True, (255, 255, 0))
+        mode_surf = self.font.render("Night" if night else "Day", True, (255, 255, 255))
+        self.screen.blit(score_surf, (10, 10))
+        self.screen.blit(hs_surf, (10, 40))
+        self.screen.blit(mode_surf, (SCREEN_WIDTH - 80, 10))
+        if self.game_over:
+            go_surf = self.font.render("GAME OVER - Press R to Restart", True, (255, 0, 0))
+            self.screen.blit(go_surf, (SCREEN_WIDTH//2 - go_surf.get_width()//2, SCREEN_HEIGHT//2))
+
+    def check_collisions(self):
+        for ob in self.obstacles:
+            if self.dino.rect.colliderect(ob.rect):
+                return True
+        return False
+
+    def screen_play(self):
+        dt = self.clock.tick(60)
+        night = self.is_night()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE and not self.game_over:
+                    self.dino.jump()
+                elif event.key == pygame.K_ESCAPE:
+                    return False
+                elif event.key == pygame.K_r and self.game_over:
+                    self.reset()
+
+        if not self.game_over:
+            self.score += 1
+            if self.score > self.high_score:
+                self.high_score = self.score
+            if self.score % 500 == 0:
+                self.speed += 0.5
+
+            # Obstacles
+            self.spawn_timer -= dt
+            if self.spawn_timer <= 0:
+                self.spawn_obstacle()
+                self.spawn_timer = clamp(
+                    random.randint(700, 1200) - int((self.speed - 6.0) * 40),
+                    420, 1000
+                )
+            self.obstacles = [ob for ob in self.obstacles if ob.update(dt)]
+
+            # Clouds
+            self.cloud_timer -= dt
+            if self.cloud_timer <= 0:
+                self.spawn_cloud()
+                self.cloud_timer = random.randint(1600, 2800)
+            self.clouds = [cl for cl in self.clouds if cl.update(dt)]
+
+            self.ground.update(dt)
+            self.dino.update(dt)
+
+            if self.check_collisions():
+                self.game_over = True
+                if self.gameover_sound: self.gameover_sound.play()
+
+        # Draw
+        self.screen.fill(NIGHT if night else SKY)
+        for cl in self.clouds:
+            cl.draw(self.screen, night)
+        self.ground.draw(self.screen, night)
+        for ob in self.obstacles:
+            ob.draw(self.screen, night)
+        self.dino.draw(self.screen, night)
+        self.draw_hud(night)
+        pygame.display.flip()
+        return True
+
+    def run(self):
+        while self.running:
+            self.running = self.screen_play()
+
+if __name__ == "__main__":
+    Game().run()
+    pygame.quit()
